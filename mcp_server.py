@@ -4,21 +4,32 @@ Database Metadata MCP Server with Starlette mounting
 Run with: uvicorn mcp_server:app --host 127.0.0.1 --port 8002 --reload
 """
 
-import json, os, contextlib
+import json
+import os
+import contextlib
+import glob
 from typing import List, Dict, Any
 from starlette.applications import Starlette
 from starlette.routing import Mount
 from mcp.server.fastmcp import FastMCP
+from loguru import logger
 
-METADATA_PATH = os.environ.get("MCP_METADATA_PATH", "./metadata_cache/metadata.json")
+METADATA_DIR = os.environ.get("MCP_METADATA_DIR", "./metadata_cache")
 
 # Create the MCP server with stateless HTTP support
 mcp = FastMCP("Metadata-MCP", stateless_http=True, json_response=True)
 
 
 def _load() -> Dict[str, Any]:
-    with open(METADATA_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    """Load all per-source JSON files from METADATA_DIR and return as {sources: {name: data}}."""
+    sources = {}
+    pattern = os.path.join(METADATA_DIR, "*.json")
+    for path in glob.glob(pattern):
+        source_name = os.path.splitext(os.path.basename(path))[0]
+        with open(path, "r", encoding="utf-8") as f:
+            sources[source_name] = json.load(f)
+        logger.info(f"Loaded metadata for source '{source_name}' from {path}")
+    return {"sources": sources}
 
 
 @mcp.tool()
@@ -134,8 +145,9 @@ def suggest_joins(
             continue
         for e in neighbors(cur):
             nxt = e["to"] if e["from"] == cur else e["from"]
-            if nxt in nodes:  # avoid cycles
+            if nxt in seen:  # avoid cycles
                 continue
+            seen.add(nxt)
             q.append((nodes + [nxt], es + [e]))
     # sort by confidence desc, FK-first within similar scores
     paths.sort(

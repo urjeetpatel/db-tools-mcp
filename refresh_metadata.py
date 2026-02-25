@@ -570,6 +570,7 @@ def main():
         logger.info("DRY RUN MODE - No queries will be executed")
 
     cfg = load_cfg(args.config)
+    out_dir = cfg.get("output", {}).get("dir", "./metadata_cache")
 
     if args.list_schemas:
         logger.info("LIST SCHEMAS MODE - Discovering available schemas")
@@ -584,53 +585,26 @@ def main():
         sys.exit(1)
 
     try:
-        # Load existing metadata if we're updating a single source
-        existing_metadata = {"sources": {}}
-        out_p = cfg["output"]["path"]
-        
-        if args.source and os.path.exists(out_p):
-            logger.info(f"Loading existing metadata from {out_p}")
-            try:
-                with open(out_p, "r", encoding="utf-8") as f:
-                    existing_metadata = json.load(f)
-                # Ensure sources key exists
-                if "sources" not in existing_metadata:
-                    existing_metadata["sources"] = {}
-                logger.info("Existing metadata loaded successfully")
-            except Exception as e:
-                logger.warning(f"Could not load existing metadata: {e}")
-                logger.info("Starting with empty metadata")
-        
-        final = existing_metadata
-
         # Determine which sources to process
-        sources_to_process = {}
         if args.source:
-            # Process only the specified source
             logger.info(f"Processing single source: {args.source}")
-            sources_to_process[args.source] = cfg[args.source]
+            sources_to_process = {args.source: cfg[args.source]}
         else:
-            # Process all sources (original behavior)
             logger.info("Processing all configured sources")
             sources_to_process = {k: v for k, v in cfg.items() if k != "output"}
 
+        written = []
+
         # Process the selected sources
         for source_name, source_config in sources_to_process.items():
-            if source_name == "output":  # Skip output configuration
-                continue
-
-            if not source_config.get("enabled", True):  # Skip if explicitly disabled
+            if not source_config.get("enabled", True):
                 logger.info(f"{source_name} extraction disabled")
                 continue
 
-            if args.source:
-                logger.info(f"Updating metadata for source '{source_name}' only")
-
-            # Determine source type based on configuration keys
+            # Extract metadata based on source type
             if "url" in source_config:
-                # SQL Server source (has direct URL)
                 logger.info(f"{source_name} (SQL Server) extraction enabled")
-                final["sources"][source_name] = extract_sqlserver(
+                source_metadata = extract_sqlserver(
                     source_config["url"],
                     source_config.get("include_schemas", ["*"]),
                     source_config.get("exclude_schemas", []),
@@ -639,11 +613,10 @@ def main():
                 logger.info(f"{source_name} (SQL Server) extraction completed")
 
             elif "sqlserver_url" in source_config and "linked_server" in source_config:
-                # Snowflake source (via OPENQUERY/linked server)
                 logger.info(
                     f"{source_name} (Snowflake via OPENQUERY) extraction enabled"
                 )
-                final["sources"][source_name] = extract_snowflake(
+                source_metadata = extract_snowflake(
                     source_config["sqlserver_url"],
                     source_config["linked_server"],
                     source_config["database"],
@@ -658,38 +631,31 @@ def main():
                 logger.warning(
                     f"Skipping {source_name}: unrecognized configuration format"
                 )
+                continue
 
-        if not args.dry_run:
-            out_p = cfg["output"]["path"]
-            logger.info(f"Writing metadata to {out_p}")
-            os.makedirs(os.path.dirname(out_p), exist_ok=True)
-            with open(out_p, "w", encoding="utf-8") as f:
-                json.dump(final, f, indent=2)
-            if args.source:
-                print(f"Updated metadata for '{args.source}' in {out_p}")
-            else:
-                print(f"Wrote metadata to {out_p}")
-        else:
+            if not args.dry_run:
+                out_p = os.path.join(out_dir, f"{source_name}.json")
+                os.makedirs(out_dir, exist_ok=True)
+                with open(out_p, "w", encoding="utf-8") as f:
+                    json.dump(source_metadata, f, indent=2)
+                logger.info(f"Wrote metadata for '{source_name}' to {out_p}")
+                print(f"Wrote {out_p}")
+                written.append(out_p)
+
+        if args.dry_run:
             logger.info("DRY RUN - Skipping file output")
             print("DRY RUN MODE - No files were written")
-
-        # Log summary
-        if args.source:
-            processed_schemas = len(final["sources"].get(args.source, {}).get("schemas", {}))
-            logger.info("=== Single Source Metadata Refresh Complete ===")
-            logger.info(f"Source processed: {args.source}")
-            logger.info(f"Schemas processed: {processed_schemas}")
         else:
             total_schemas = sum(
-                len(source.get("schemas", {})) for source in final["sources"].values()
+                len(cfg[s].get("schemas", {}))
+                for s in sources_to_process
+                if s in cfg and isinstance(cfg[s], dict)
             )
-            processed_sources = list(sources_to_process.keys())
             logger.info("=== Metadata Refresh Complete ===")
-            logger.info(f"Sources processed: {', '.join(processed_sources)}")
-            logger.info(f"Total schemas: {total_schemas}")
-        
-        if not args.dry_run:
-            logger.info(f"Output file: {cfg['output']['path']}")
+            logger.info(f"Sources processed: {', '.join(sources_to_process.keys())}")
+            logger.info(f"Output directory: {out_dir}")
+            logger.info(f"Total schemas processed: {total_schemas}")
+            logger.info(f"Files written: {', '.join(written)}")
 
     except Exception as e:
         logger.error(f"Fatal error during metadata refresh: {e}")

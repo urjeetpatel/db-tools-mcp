@@ -45,7 +45,7 @@ snowflake:
   include_schemas: ["*"]
   exclude_schemas: ["INFORMATION_SCHEMA"]
 output:
-  path: "./metadata_cache/metadata.json"
+  dir: "./metadata_cache"
 
 rx30_offline:
   enabled: true
