@@ -1,3 +1,1 @@
-# Activate the virtual environment and run the refresh script
-& "$PSScriptRoot\venv\Scripts\Activate.ps1"
-& python "$PSScriptRoot\refresh_metadata.py" --config "$PSScriptRoot\config.yaml"
+uv --directory "C:\\Users\\upatel\\OneDrive - Orsini Pharmaceutical Services, LLC\\Desktop\\Projects\\db_diagrams" run refresh_metadata.py

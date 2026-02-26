@@ -1,7 +1,0 @@
-sqlalchemy>=2.0
-pyodbc>=5.0
-mcp[cli]>=1.26.0
-PyYAML
-loguru
-uvicorn>=0.30.0
-starlette>=0.40.0

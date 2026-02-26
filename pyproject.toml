@@ -1,0 +1,13 @@
+[project]
+name = "db-diagrams"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "fastmcp>=3.0.2",
+    "loguru>=0.7.3",
+    "pyodbc>=5.3.0",
+    "pyyaml>=6.0.3",
+    "sqlalchemy>=2.0.47",
+]

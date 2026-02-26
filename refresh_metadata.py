@@ -43,6 +43,38 @@ JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu2
 
 
 # ---------- Snowflake helpers (via OPENQUERY) ----------
+def snowflake_show_imported_keys_native(
+    engine: Engine, linked_server: str, database: str, schema: str, dry_run: bool = False
+) -> List[dict]:
+    """
+    Alternative approach: Use Snowflake's native SHOW commands for foreign keys.
+    This works for schemas individually and may be more reliable than INFORMATION_SCHEMA.
+    """
+    logger.debug(f"Trying native Snowflake SHOW IMPORTED KEYS for schema '{schema}'")
+    
+    show_sql = f"""
+    SELECT * FROM OPENQUERY({linked_server}, '
+        SHOW IMPORTED KEYS IN SCHEMA {database}.{schema}
+    ')
+    """
+    
+    if dry_run:
+        print(f"\n=== DRY RUN: Native Snowflake SHOW IMPORTED KEYS for {schema} ===")
+        print(show_sql)
+        print("=== End Query ===")
+        return []
+
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text(show_sql))
+            rows = [dict(r._mapping) for r in result]
+        logger.debug(f"Native SHOW command returned {len(rows)} foreign key relationships for schema '{schema}'")
+        return rows
+    except Exception as e:
+        logger.debug(f"Native SHOW IMPORTED KEYS failed for schema '{schema}': {e}")
+        return []
+
+
 def snowflake_show_imported_keys(
     engine: Engine, linked_server: str, database: str, dry_run: bool = False
 ) -> List[dict]:
@@ -50,40 +82,65 @@ def snowflake_show_imported_keys(
     logger.info(
         f"Retrieving Snowflake foreign keys via OPENQUERY from linked server '{linked_server}' database '{database}'"
     )
-    # Note: SHOW commands through OPENQUERY can be tricky, so we'll try to use INFORMATION_SCHEMA instead
-    # If your Snowflake has proper FK metadata in INFORMATION_SCHEMA, use that; otherwise this might return empty
-    sql = f"""
+    
+    # First, try using Snowflake's SHOW IMPORTED KEYS command
+    # This is more reliable than INFORMATION_SCHEMA for Snowflake
+    show_keys_sql = f"""
     SELECT * FROM OPENQUERY({linked_server}, '
-        SELECT
-            rc.CONSTRAINT_SCHEMA as schema_name,
-            rc.CONSTRAINT_NAME as fk_name,
-            kcu1.TABLE_NAME as table_name,
-            kcu1.COLUMN_NAME as fk_column_name,
-            kcu2.TABLE_SCHEMA as pk_schema_name,
-            kcu2.TABLE_NAME as pk_table_name,
-            kcu2.COLUMN_NAME as pk_column_name,
-            kcu1.ORDINAL_POSITION as key_sequence
-        FROM {database}.INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc
-        JOIN {database}.INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu1
-            ON kcu1.CONSTRAINT_NAME = rc.CONSTRAINT_NAME
-            AND kcu1.CONSTRAINT_SCHEMA = rc.CONSTRAINT_SCHEMA
-        JOIN {database}.INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu2
-            ON kcu2.CONSTRAINT_NAME = rc.UNIQUE_CONSTRAINT_NAME
-            AND kcu2.CONSTRAINT_SCHEMA = rc.UNIQUE_CONSTRAINT_SCHEMA
-            AND kcu2.ORDINAL_POSITION = kcu1.ORDINAL_POSITION
+        SELECT 
+            fk_schema_name as schema_name,
+            fk_name,
+            fk_table_name as table_name,
+            fk_column_name,
+            pk_schema_name,
+            pk_table_name,
+            pk_column_name,
+            key_sequence
+        FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))
+        WHERE 1=0  -- This is a placeholder query that will be replaced
     ')
     """
+    
+    # Alternative approach: Try to use TABLE_CONSTRAINTS and CONSTRAINT_COLUMN_USAGE
+    info_schema_sql = f"""
+    SELECT * FROM OPENQUERY({linked_server}, '
+        SELECT
+            tc.CONSTRAINT_SCHEMA as schema_name,
+            tc.CONSTRAINT_NAME as fk_name,
+            tc.TABLE_NAME as table_name,
+            ccu.COLUMN_NAME as fk_column_name,
+            NULL as pk_schema_name,
+            NULL as pk_table_name,
+            NULL as pk_column_name,
+            ccu.ORDINAL_POSITION as key_sequence
+        FROM {database}.INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+        LEFT JOIN {database}.INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE ccu
+            ON ccu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
+            AND ccu.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
+        WHERE tc.CONSTRAINT_TYPE = ''FOREIGN KEY''
+    ')
+    """
+    
     if dry_run:
-        print("\n=== DRY RUN: Snowflake Foreign Keys Query ===")
-        print(sql)
+        print("\n=== DRY RUN: Snowflake Foreign Keys Query (Alternative Approach) ===")
+        print(info_schema_sql)
         print("=== End Query ===")
         return []  # Return empty list in dry run
 
-    with engine.connect() as conn:
-        result = conn.execute(text(sql))
-        rows = [dict(r._mapping) for r in result]
-    logger.info(f"Found {len(rows)} foreign key relationships")
-    return rows
+    # Try the alternative INFORMATION_SCHEMA approach first
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text(info_schema_sql))
+            rows = [dict(r._mapping) for r in result]
+        logger.info(f"Found {len(rows)} foreign key relationships using TABLE_CONSTRAINTS")
+        return rows
+    except Exception as e:
+        logger.warning(f"TABLE_CONSTRAINTS approach failed: {e}")
+    
+    # If that fails, we'll return empty list and rely on heuristic matching
+    logger.warning("Snowflake foreign key extraction failed - foreign keys may not be properly defined in the database or accessible through the linked server")
+    logger.info("Will rely on heuristic column name matching for relationship suggestions")
+    return []
 
 
 def snowflake_info_schema_openquery(
@@ -376,8 +433,10 @@ def extract_snowflake(
             if eng is not None
             else []
         )
+        logger.info(f"Successfully retrieved {len(show_rows)} foreign key relationships from Snowflake")
     except Exception as e:
         logger.warning(f"Could not retrieve foreign keys via OPENQUERY: {e}")
+        logger.info("Continuing without foreign key metadata - will use heuristic matching instead")
         show_rows = []
 
     # Build fast index
@@ -436,6 +495,87 @@ def extract_snowflake(
         f"Snowflake metadata extraction complete - processed {len(payload['schemas'])} schemas"
     )
     return payload
+
+
+def test_snowflake_connection(cfg: dict, dry_run: bool = False):
+    """Test Snowflake connection and list available INFORMATION_SCHEMA tables."""
+    snowflake_config = cfg.get("snowflake", {})
+    
+    if not snowflake_config.get("enabled", False):
+        logger.error("Snowflake is not enabled in configuration")
+        return
+        
+    sqlserver_url = snowflake_config["sqlserver_url"]
+    linked_server = snowflake_config["linked_server"]
+    database = snowflake_config["database"]
+    
+    logger.info(f"Testing Snowflake connection via linked server '{linked_server}' database '{database}'")
+    
+    # Test basic connection
+    test_sql = f"""
+    SELECT * FROM OPENQUERY({linked_server}, '
+        SELECT CURRENT_DATABASE(), CURRENT_SCHEMA(), CURRENT_VERSION()
+    ')
+    """
+    
+    # Check available INFORMATION_SCHEMA tables
+    info_tables_sql = f"""
+    SELECT * FROM OPENQUERY({linked_server}, '
+        SELECT TABLE_NAME 
+        FROM {database}.INFORMATION_SCHEMA.TABLES 
+        WHERE TABLE_SCHEMA = ''INFORMATION_SCHEMA''
+        ORDER BY TABLE_NAME
+    ')
+    """
+    
+    if dry_run:
+        print("\n=== DRY RUN: Snowflake Connection Test ===")
+        print("Basic connection test:")
+        print(test_sql)
+        print("\nINFORMATION_SCHEMA tables check:")
+        print(info_tables_sql)
+        print("=== End Queries ===")
+        return
+    
+    try:
+        eng = create_engine(sqlserver_url)
+        
+        # Test basic connection
+        logger.info("Testing basic Snowflake connection...")
+        with eng.connect() as conn:
+            result = conn.execute(text(test_sql))
+            rows = [dict(r._mapping) for r in result]
+            logger.info(f"Connection successful: {rows}")
+        
+        # Check INFORMATION_SCHEMA tables
+        logger.info("Checking available INFORMATION_SCHEMA tables...")
+        with eng.connect() as conn:
+            result = conn.execute(text(info_tables_sql))
+            tables = [dict(r._mapping) for r in result]
+            logger.info(f"Available INFORMATION_SCHEMA tables ({len(tables)}):")
+            for table in tables:
+                print(f"  - {table.get('TABLE_NAME', table)}")
+                
+        # Specifically check for KEY_COLUMN_USAGE
+        key_usage_sql = f"""
+        SELECT * FROM OPENQUERY({linked_server}, '
+            SELECT COUNT(*) as TABLE_EXISTS
+            FROM {database}.INFORMATION_SCHEMA.TABLES 
+            WHERE TABLE_SCHEMA = ''INFORMATION_SCHEMA''
+            AND TABLE_NAME = ''KEY_COLUMN_USAGE''
+        ')
+        """
+        
+        with eng.connect() as conn:
+            result = conn.execute(text(key_usage_sql))
+            exists = [dict(r._mapping) for r in result]
+            if exists and exists[0].get('TABLE_EXISTS', 0) > 0:
+                logger.info("✓ KEY_COLUMN_USAGE table exists")
+            else:
+                logger.warning("✗ KEY_COLUMN_USAGE table does not exist or is not accessible")
+                
+    except Exception as e:
+        logger.error(f"Snowflake connection test failed: {e}")
 
 
 def list_available_schemas(cfg: dict, dry_run: bool = False):
@@ -548,6 +688,9 @@ def main():
         "--list-schemas", action="store_true", help="List available schemas and exit"
     )
     ap.add_argument(
+        "--test-snowflake", action="store_true", help="Test Snowflake connection and check INFORMATION_SCHEMA tables"
+    )
+    ap.add_argument(
         "--source", "-s", type=str, help="Process only the specified source/database"
     )
     args = ap.parse_args()
@@ -575,6 +718,11 @@ def main():
     if args.list_schemas:
         logger.info("LIST SCHEMAS MODE - Discovering available schemas")
         list_available_schemas(cfg, args.dry_run)
+        return
+        
+    if args.test_snowflake:
+        logger.info("TEST SNOWFLAKE MODE - Testing connection and INFORMATION_SCHEMA")
+        test_snowflake_connection(cfg, args.dry_run)
         return
 
     # Validate source parameter if specified

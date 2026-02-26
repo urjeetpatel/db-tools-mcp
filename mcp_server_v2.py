@@ -1,23 +1,21 @@
-# mcp_server.py
+# mcp_server_v2.py
 """
-Database Metadata MCP Server with Starlette mounting
-Run with: uvicorn mcp_server:app --host 127.0.0.1 --port 8002 --reload
+Database Metadata MCP Server (FastMCP v2, stdio transport)
+Run with: python mcp_server_v2.py
 """
 
 import json
 import os
-import contextlib
 import glob
+from collections import deque
 from typing import List, Dict, Any
-from starlette.applications import Starlette
-from starlette.routing import Mount
-from mcp.server.fastmcp import FastMCP
+
+from fastmcp import FastMCP
 from loguru import logger
 
 METADATA_DIR = os.environ.get("MCP_METADATA_DIR", "./metadata_cache")
 
-# Create the MCP server with stateless HTTP support
-mcp = FastMCP("Metadata-MCP", stateless_http=True, json_response=True)
+mcp = FastMCP(name="Metadata-MCP")
 
 
 def _load() -> Dict[str, Any]:
@@ -32,30 +30,29 @@ def _load() -> Dict[str, Any]:
     return {"sources": sources}
 
 
-@mcp.tool()
+@mcp.tool
 def list_sources() -> List[str]:
     """List available sources (e.g., sqlserver, snowflake)."""
     return list(_load().get("sources", {}).keys())
 
 
-@mcp.tool()
+@mcp.tool
 def list_schemas(source: str) -> List[str]:
     """List schemas for a source."""
     return list(_load()["sources"][source]["schemas"].keys())
 
 
-@mcp.tool()
+@mcp.tool
 def list_tables(source: str, schema: str) -> List[str]:
     """List tables for a schema."""
     return list(_load()["sources"][source]["schemas"][schema]["tables"].keys())
 
 
-@mcp.tool()
+@mcp.tool
 def get_table(source: str, schema: str, table: str) -> Dict[str, Any]:
-    """Get columns & constraints for a table."""
+    """Get columns & constraints for a table, including inbound/outbound FK summaries."""
     data = _load()["sources"][source]["schemas"][schema]
     t = data["tables"][table]
-    # include inbound/outbound FK summaries
     inbound, outbound = [], []
     for fk in data["foreign_keys"]:
         if fk["parent"]["schema"] == schema and fk["parent"]["table"] == table:
@@ -69,7 +66,7 @@ def get_table(source: str, schema: str, table: str) -> Dict[str, Any]:
     }
 
 
-@mcp.tool()
+@mcp.tool
 def find_direct_joins(source: str, table_a: str, table_b: str) -> List[Dict[str, Any]]:
     """Return FK-defined direct joins (either direction) between two tables within the same source."""
     res = []
@@ -82,7 +79,7 @@ def find_direct_joins(source: str, table_a: str, table_b: str) -> List[Dict[str,
     return res
 
 
-@mcp.tool()
+@mcp.tool
 def suggest_joins(
     source: str, table_a: str, table_b: str, max_hops: int = 2
 ) -> List[Dict[str, Any]]:
@@ -91,9 +88,7 @@ def suggest_joins(
     Output ordered by descending confidence.
     """
     data = _load()["sources"][source]["schemas"]
-    # Build graph edges (FKs)
     edges = []
-    heuristics = []
     for sch, sdata in data.items():
         for fk in sdata["foreign_keys"]:
             edges.append(
@@ -118,10 +113,6 @@ def suggest_joins(
                     "reason": reason,
                 }
             )
-            heuristics.append(edges[-1])
-
-    # Tiny BFS up to max_hops
-    from collections import deque
 
     def neighbors(node):
         return [e for e in edges if e["from"] == node or e["to"] == node]
@@ -132,10 +123,9 @@ def suggest_joins(
     while q:
         nodes, es = q.popleft()
         cur = nodes[-1]
-        if len(nodes) - 1 > max_hops:  # hops == edges count
+        if len(nodes) - 1 > max_hops:
             continue
         if cur == table_b and es:
-            # score: product-like; prefer FK over heuristic
             score = 1.0
             for e in es:
                 score *= e["score"]
@@ -145,11 +135,11 @@ def suggest_joins(
             continue
         for e in neighbors(cur):
             nxt = e["to"] if e["from"] == cur else e["from"]
-            if nxt in seen:  # avoid cycles
+            if nxt in seen:
                 continue
             seen.add(nxt)
             q.append((nodes + [nxt], es + [e]))
-    # sort by confidence desc, FK-first within similar scores
+
     paths.sort(
         key=lambda x: (
             -x["confidence"],
@@ -159,26 +149,5 @@ def suggest_joins(
     return paths[:10]
 
 
-# Create lifespan to manage session manager
-@contextlib.asynccontextmanager
-async def lifespan(app: Starlette):
-    async with mcp.session_manager.run():
-        yield
-
-
-# Create the Starlette app and mount the MCP server
-app = Starlette(
-    routes=[
-        Mount("/", mcp.streamable_http_app()),
-    ],
-    lifespan=lifespan,
-)
-
-# Note: Clients connect to http://localhost:8002/
-# The MCP protocol endpoints will be available at the root path
-
 if __name__ == "__main__":
-    import uvicorn
-
-    # Start the server on port 8002
-    uvicorn.run(app, host="127.0.0.1", port=8002)
+    mcp.run()  # stdio transport by default
