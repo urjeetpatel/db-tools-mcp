@@ -157,5 +157,61 @@ def suggest_joins(
     return paths[:10]
 
 
+@mcp.tool
+def get_dialect(source: str) -> str:
+    """Return the SQL dialect for a source (e.g. 'mssql', 'snowflake')."""
+    return _load()["sources"][source].get("dialect", "unknown")
+
+
+@mcp.tool
+def list_all_foreign_keys(source: str, schema: str) -> List[Dict[str, Any]]:
+    """Return all foreign keys defined in a schema."""
+    return _load()["sources"][source]["schemas"][schema].get("foreign_keys", [])
+
+
+@mcp.tool
+def search_tables(source: str, keyword: str) -> List[Dict[str, str]]:
+    """
+    Search for tables whose names contain keyword (case-insensitive) across all schemas in a source.
+    Returns a list of {schema, table} dicts ordered alphabetically.
+    """
+    kw = keyword.lower()
+    results = []
+    for schema, sdata in _load()["sources"][source]["schemas"].items():
+        for table in sdata["tables"]:
+            if kw in table.lower():
+                results.append({"schema": schema, "table": table})
+    return sorted(results, key=lambda x: (x["schema"], x["table"]))
+
+
+@mcp.tool
+def search_columns(
+    source: str, column_name: str, schema: str = None
+) -> List[Dict[str, str]]:
+    """
+    Search for columns whose names contain column_name (case-insensitive) across all tables.
+    Optionally restrict to a single schema.
+    Returns a list of {schema, table, column, data_type, nullable} dicts ordered alphabetically.
+    """
+    kw = column_name.lower()
+    results = []
+    sources_data = _load()["sources"][source]["schemas"]
+    schemas_to_search = {schema: sources_data[schema]} if schema else sources_data
+    for sch, sdata in schemas_to_search.items():
+        for table, tdata in sdata["tables"].items():
+            for col in tdata["columns"]:
+                if kw in col["name"].lower():
+                    results.append(
+                        {
+                            "schema": sch,
+                            "table": table,
+                            "column": col["name"],
+                            "data_type": col.get("data_type", ""),
+                            "nullable": col.get("nullable", None),
+                        }
+                    )
+    return sorted(results, key=lambda x: (x["schema"], x["table"], x["column"]))
+
+
 if __name__ == "__main__":
     mcp.run()  # stdio transport by default
