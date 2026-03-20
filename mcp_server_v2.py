@@ -52,7 +52,15 @@ def list_tables(source: str, schema: str) -> List[str]:
 def get_table(source: str, schema: str, table: str) -> Dict[str, Any]:
     """Get columns & constraints for a table, including inbound/outbound FK summaries."""
     data = _load()["sources"][source]["schemas"][schema]
-    t = data["tables"][table]
+    try:
+        t = data["tables"][table]
+    except KeyError:
+        return {
+            "columns": [],
+            "foreign_keys_inbound": [],
+            "foreign_keys_outbound": [],
+            "error": "Table not found",
+        }
     inbound, outbound = [], []
     for fk in data["foreign_keys"]:
         if fk["parent"]["schema"] == schema and fk["parent"]["table"] == table:

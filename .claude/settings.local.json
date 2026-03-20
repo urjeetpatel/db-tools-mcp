@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Db_Tools__list_sources",
+      "mcp__Db_Tools__list_schemas",
+      "mcp__Db_Tools__list_tables",
+      "mcp__Db_Tools__find_direct_joins",
+      "mcp__Db_Tools__suggest_joins",
+      "mcp__Db_Tools__get_table"
+    ]
+  }
+}
