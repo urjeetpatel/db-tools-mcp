@@ -277,12 +277,73 @@ def extract_snowflake(
 
 
 # ---------------------------------------------------------------------------
+# Diff helper
+# ---------------------------------------------------------------------------
+def _diff_metadata(old: dict, new: dict) -> dict:
+    """
+    Compare two metadata dicts and return a structured diff suitable for an
+    agent to summarise.  Both dicts have the shape produced by extract_*:
+      { "dialect": "...", "schemas": { schema_name: { "tables": {...}, ... } } }
+    """
+    old_schemas = old.get("schemas", {})
+    new_schemas = new.get("schemas", {})
+
+    added_schemas = sorted(set(new_schemas) - set(old_schemas))
+    removed_schemas = sorted(set(old_schemas) - set(new_schemas))
+    changed_schemas: Dict[str, Any] = {}
+
+    for schema in sorted(set(old_schemas) & set(new_schemas)):
+        old_tables = old_schemas[schema].get("tables", {})
+        new_tables = new_schemas[schema].get("tables", {})
+
+        added_tables = sorted(set(new_tables) - set(old_tables))
+        removed_tables = sorted(set(old_tables) - set(new_tables))
+        changed_tables: Dict[str, Any] = {}
+
+        for table in sorted(set(old_tables) & set(new_tables)):
+            old_cols = {c["name"]: c for c in old_tables[table].get("columns", [])}
+            new_cols = {c["name"]: c for c in new_tables[table].get("columns", [])}
+
+            added_cols = sorted(set(new_cols) - set(old_cols))
+            removed_cols = sorted(set(old_cols) - set(new_cols))
+            modified_cols = [
+                {"column": name, "old": old_cols[name], "new": new_cols[name]}
+                for name in sorted(set(old_cols) & set(new_cols))
+                if old_cols[name] != new_cols[name]
+            ]
+
+            if added_cols or removed_cols or modified_cols:
+                changed_tables[table] = {
+                    "columns_added": added_cols,
+                    "columns_removed": removed_cols,
+                    "columns_modified": modified_cols,
+                }
+
+        if added_tables or removed_tables or changed_tables:
+            changed_schemas[schema] = {
+                "tables_added": added_tables,
+                "tables_removed": removed_tables,
+                "tables_changed": changed_tables,
+            }
+
+    has_changes = bool(added_schemas or removed_schemas or changed_schemas)
+    return {
+        "has_changes": has_changes,
+        "schemas_added": added_schemas,
+        "schemas_removed": removed_schemas,
+        "schemas_changed": changed_schemas,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Shared refresh entry point (used by MCP tool + CLI)
 # ---------------------------------------------------------------------------
-def run_refresh(source_name: str, source_cfg: dict) -> str:
+def run_refresh(source_name: str, source_cfg: dict) -> dict:
     """
     Extract metadata for one source and write JSON to CACHE_DIR.
-    Returns a human-readable status string.
+    Returns a dict with keys:
+      - detail  : human-readable status string
+      - diff    : structured diff between old and new metadata
     """
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -307,12 +368,27 @@ def run_refresh(source_name: str, source_cfg: dict) -> str:
         )
 
     out_path = CACHE_DIR / f"{source_name}.json"
+
+    # Load previous cache (if any) so we can diff
+    old_metadata: dict = {}
+    if out_path.exists():
+        try:
+            with out_path.open("r", encoding="utf-8") as fh:
+                old_metadata = json.load(fh)
+        except Exception:
+            pass  # treat as first-time refresh
+
+    diff = _diff_metadata(old_metadata, metadata)
+
     with out_path.open("w", encoding="utf-8") as fh:
         json.dump(metadata, fh, indent=2)
 
     mark_refreshed(source_name)
     schema_count = len(metadata.get("schemas", {}))
-    return f"Wrote {out_path} ({schema_count} schemas)"
+    return {
+        "detail": f"Wrote {out_path} ({schema_count} schemas)",
+        "diff": diff,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -363,8 +439,8 @@ def cli_main() -> None:
             logger.info(f"Skipping '{src_name}' (disabled)")
             continue
         try:
-            msg = run_refresh(src_name, src_cfg)
-            logger.info(f"OK  {src_name}: {msg}")
+            result = run_refresh(src_name, src_cfg)
+            logger.info(f"OK  {src_name}: {result['detail']}")
         except Exception as exc:
             logger.error(f"ERR {src_name}: {exc}")
             exit_code = 1

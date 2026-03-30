@@ -317,9 +317,13 @@ def refresh_metadata(
             continue
 
         try:
-            detail = run_refresh(src_name, src_cfg)
-            results[src_name] = {"status": "ok", "detail": detail}
-            logger.info(f"Refreshed '{src_name}': {detail}")
+            refresh_result = run_refresh(src_name, src_cfg)
+            results[src_name] = {
+                "status": "ok",
+                "detail": refresh_result["detail"],
+                "diff": refresh_result["diff"],
+            }
+            logger.info(f"Refreshed '{src_name}': {refresh_result['detail']}")
         except Exception as exc:
             results[src_name] = {"status": "error", "detail": repr(exc)}
             logger.exception(f"Refresh failed for '{src_name}'")
