@@ -1,8 +1,14 @@
-__pycache__
+__pycache__/
 *.pyc
 *.pyo
 *.pyd
 .mypy_cache/
+.venv*/
 venv/
-metadata_cache/
 *.log
+dist/
+*.egg-info/
+
+# User config and cache live in ~/.config/db-tools/, not in the repo
+config.yaml
+metadata_cache/

@@ -6,7 +6,13 @@
       "mcp__Db_Tools__list_tables",
       "mcp__Db_Tools__find_direct_joins",
       "mcp__Db_Tools__suggest_joins",
-      "mcp__Db_Tools__get_table"
+      "mcp__Db_Tools__get_table",
+      "mcp__Db_Tools__get_dialect",
+      "mcp__Db_Tools__list_all_foreign_keys",
+      "mcp__Db_Tools__search_tables",
+      "mcp__Db_Tools__search_columns",
+      "Bash(rm -rf .venv)",
+      "Bash(uv sync:*)"
     ]
   }
 }

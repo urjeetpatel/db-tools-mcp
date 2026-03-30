@@ -1,0 +1,45 @@
+# db-tools-mcp configuration
+#
+# Copy to:  ~/.config/db-tools/config.yaml
+#   Linux/macOS : cp config.example.yaml ~/.config/db-tools/config.yaml
+#   Windows     : copy config.example.yaml %USERPROFILE%\.config\db-tools\config.yaml
+#
+# Or use the add_database MCP tool to create entries interactively.
+#
+# Override the config directory with:
+#   DB_TOOLS_CONFIG_DIR=/custom/path  (env var, takes precedence)
+#   XDG_CONFIG_HOME=~/.config         (XDG standard, second priority)
+
+# ---------------------------------------------------------------------------
+# SQL Server — direct ODBC connection
+# ---------------------------------------------------------------------------
+# my_sqlserver_db:
+#   enabled: true
+#   url: "mssql+pyodbc:///?odbc_connect=DRIVER=ODBC Driver 17 for SQL Server;Server=<host>;Database=<db>;Trusted_Connection=Yes;"
+#   include_schemas:
+#     - "*"                          # ["*"] = all schemas, or list specific ones
+#   exclude_schemas:
+#     - INFORMATION_SCHEMA
+#     - sys
+#     - db_owner
+#     - db_accessadmin
+#     - db_securityadmin
+#     - db_ddladmin
+#     - db_backupoperator
+#     - db_datareader
+#     - db_datawriter
+#     - db_denydatareader
+#     - db_denydatawriter
+
+# ---------------------------------------------------------------------------
+# Snowflake — via SQL Server linked server (OPENQUERY)
+# ---------------------------------------------------------------------------
+# my_snowflake:
+#   enabled: true
+#   sqlserver_url: "mssql+pyodbc:///?odbc_connect=DRIVER=ODBC Driver 17 for SQL Server;Server=<host>;Database=<db>;Trusted_Connection=Yes;"
+#   linked_server: "SNOWFLAKE"       # linked server name in SQL Server
+#   database: "MY_SNOWFLAKE_DB"      # Snowflake database to query
+#   include_schemas:
+#     - "*"
+#   exclude_schemas:
+#     - INFORMATION_SCHEMA
