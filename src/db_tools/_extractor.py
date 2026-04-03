@@ -5,6 +5,7 @@ This module is used by:
   - The MCP server (db_tools.server) for the refresh_metadata tool
   - The CLI entry point (db-tools-refresh)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -198,7 +199,9 @@ def extract_sqlserver(url: str, include: List[str], exclude: List[str]) -> dict:
             "foreign_keys": _group_fk_rows(fks),
             "heuristics": _heuristic_pairs(cols),
         }
-        logger.info(f"  '{s}': {len(tables)} tables, {len(fks)} FKs, {len(pk_set)} PK cols")
+        logger.info(
+            f"  '{s}': {len(tables)} tables, {len(fks)} FKs, {len(pk_set)} PK cols"
+        )
 
     logger.info("SQL Server extraction complete")
     return payload
@@ -442,9 +445,7 @@ def cli_main() -> None:
         metavar="NAME",
         help="Refresh only this source (default: all enabled sources)",
     )
-    ap.add_argument(
-        "--verbose", "-v", action="store_true", help="Enable debug logging"
-    )
+    ap.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
     args = ap.parse_args()
 
     setup_cli_logging(verbose=args.verbose)
@@ -460,9 +461,7 @@ def cli_main() -> None:
     if args.source:
         if args.source not in cfg:
             available = [k for k in cfg if k != "output"]
-            logger.error(
-                f"Source '{args.source}' not found. Available: {available}"
-            )
+            logger.error(f"Source '{args.source}' not found. Available: {available}")
             sys.exit(1)
         sources = {args.source: cfg[args.source]}
     else:
