@@ -39,13 +39,23 @@ def _exec(eng: Engine, sql: str, params: Optional[dict] = None) -> List[dict]:
 def _columns_to_tables(cols: List[dict]) -> Dict[str, Any]:
     tables: Dict[str, Any] = defaultdict(lambda: {"columns": []})
     for c in cols:
-        tables[c["TABLE_NAME"]]["columns"].append(
-            {
-                "name": c["COLUMN_NAME"],
-                "data_type": c["DATA_TYPE"],
-                "nullable": c["IS_NULLABLE"] == "YES",
-            }
-        )
+        col: Dict[str, Any] = {
+            "name": c["COLUMN_NAME"],
+            "data_type": c["DATA_TYPE"],
+            "nullable": c["IS_NULLABLE"] == "YES",
+        }
+        # Extended fields — present only for SQL Server extractions
+        if "CHARACTER_MAXIMUM_LENGTH" in c:
+            col["max_length"] = c["CHARACTER_MAXIMUM_LENGTH"]  # None for non-char types
+        if "COLUMN_DEFAULT" in c:
+            col["column_default"] = c["COLUMN_DEFAULT"]  # None when no default defined
+        if "IS_IDENTITY" in c:
+            col["is_identity"] = bool(c["IS_IDENTITY"])
+        if "IS_COMPUTED" in c:
+            col["is_computed"] = bool(c["IS_COMPUTED"])
+        if "IS_PK" in c:
+            col["primary_key"] = bool(c["IS_PK"])
+        tables[c["TABLE_NAME"]]["columns"].append(col)
     return dict(tables)
 
 
@@ -111,6 +121,17 @@ def _heuristic_pairs(cols: List[dict]) -> List[Tuple]:
 # ---------------------------------------------------------------------------
 # SQL Server extraction
 # ---------------------------------------------------------------------------
+_PK_SQLSERVER = """\
+SELECT kcu.TABLE_SCHEMA, kcu.TABLE_NAME, kcu.COLUMN_NAME
+FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+  ON kcu.CONSTRAINT_CATALOG = tc.CONSTRAINT_CATALOG
+ AND kcu.CONSTRAINT_SCHEMA  = tc.CONSTRAINT_SCHEMA
+ AND kcu.CONSTRAINT_NAME    = tc.CONSTRAINT_NAME
+WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+  AND tc.TABLE_SCHEMA = :schema
+"""
+
 _FK_SQLSERVER = """\
 SELECT
   kcu1.TABLE_SCHEMA   AS fk_schema,
@@ -150,10 +171,24 @@ def extract_sqlserver(url: str, include: List[str], exclude: List[str]) -> dict:
     for s in target:
         cols = _exec(
             eng,
-            "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE "
-            "FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = :schema",
+            """
+            SELECT
+                TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME,
+                DATA_TYPE, CHARACTER_MAXIMUM_LENGTH,
+                IS_NULLABLE, COLUMN_DEFAULT,
+                COLUMNPROPERTY(OBJECT_ID(TABLE_SCHEMA+'.'+TABLE_NAME), COLUMN_NAME, 'IsIdentity') AS IS_IDENTITY,
+                COLUMNPROPERTY(OBJECT_ID(TABLE_SCHEMA+'.'+TABLE_NAME), COLUMN_NAME, 'IsComputed') AS IS_COMPUTED
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = :schema
+            ORDER BY ORDINAL_POSITION
+            """,
             {"schema": s},
         )
+        pk_rows = _exec(eng, _PK_SQLSERVER, {"schema": s})
+        pk_set = {(r["TABLE_NAME"], r["COLUMN_NAME"]) for r in pk_rows}
+        for c in cols:
+            c["IS_PK"] = (c["TABLE_NAME"], c["COLUMN_NAME"]) in pk_set
+
         fks = [r for r in all_fks if r.get("fk_schema") == s]
         tables = _columns_to_tables(cols)
         payload["schemas"][s] = {
@@ -161,7 +196,7 @@ def extract_sqlserver(url: str, include: List[str], exclude: List[str]) -> dict:
             "foreign_keys": _group_fk_rows(fks),
             "heuristics": _heuristic_pairs(cols),
         }
-        logger.info(f"  '{s}': {len(tables)} tables, {len(fks)} FKs")
+        logger.info(f"  '{s}': {len(tables)} tables, {len(fks)} FKs, {len(pk_set)} PK cols")
 
     logger.info("SQL Server extraction complete")
     return payload
