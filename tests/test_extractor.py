@@ -69,6 +69,18 @@ class TestColumnsToTables:
         assert name_col["column_default"] == "('unknown')"
         assert name_col["primary_key"] is False
 
+    def test_varchar_max_sentinel(self):
+        cols = [
+            {
+                "TABLE_NAME": "T", "COLUMN_NAME": "notes", "DATA_TYPE": "varchar",
+                "IS_NULLABLE": "YES", "CHARACTER_MAXIMUM_LENGTH": -1,
+                "COLUMN_DEFAULT": None, "IS_IDENTITY": 0, "IS_COMPUTED": 0,
+                "IS_PK": False,
+            },
+        ]
+        col = _columns_to_tables(cols)["T"]["columns"][0]
+        assert col["max_length"] == "max"
+
     def test_extended_fields_absent_when_not_in_row(self):
         """Rows without extended fields (e.g. Snowflake) should not emit the new keys."""
         cols = [

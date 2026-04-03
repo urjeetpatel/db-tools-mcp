@@ -46,7 +46,9 @@ def _columns_to_tables(cols: List[dict]) -> Dict[str, Any]:
         }
         # Extended fields — present only for SQL Server extractions
         if "CHARACTER_MAXIMUM_LENGTH" in c:
-            col["max_length"] = c["CHARACTER_MAXIMUM_LENGTH"]  # None for non-char types
+            raw_len = c["CHARACTER_MAXIMUM_LENGTH"]
+            # SQL Server returns -1 for varchar(max)/nvarchar(max)/varbinary(max)
+            col["max_length"] = "max" if raw_len == -1 else raw_len
         if "COLUMN_DEFAULT" in c:
             col["column_default"] = c["COLUMN_DEFAULT"]  # None when no default defined
         if "IS_IDENTITY" in c:
