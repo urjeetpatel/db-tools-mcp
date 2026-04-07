@@ -4,7 +4,9 @@ Database Metadata MCP Server.
 Tools:
   Read  : list_sources, list_schemas, list_tables, get_table, get_dialect,
           list_all_foreign_keys, find_direct_joins, suggest_joins,
-          search_tables, search_columns
+          search_tables, search_columns,
+          list_stored_procedures, get_stored_procedure, search_stored_procedures,
+          get_call_template
   Admin : refresh_metadata, add_database
 
 Config : ~/.config/db-tools/config.yaml   (or $DB_TOOLS_CONFIG_DIR)
@@ -248,6 +250,231 @@ def search_columns(
                         }
                     )
     return sorted(results, key=lambda x: (x["schema"], x["table"], x["column"]))
+
+
+# ---------------------------------------------------------------------------
+# Stored procedure tools
+# ---------------------------------------------------------------------------
+@mcp.tool
+def list_stored_procedures(source: str, schema: str) -> List[str]:
+    """List all stored procedure names in a given schema."""
+    return sorted(
+        _load_cache()["sources"][source]["schemas"][schema]
+        .get("stored_procedures", {})
+        .keys()
+    )
+
+
+@mcp.tool
+def get_stored_procedure(source: str, schema: str, name: str) -> Dict[str, Any]:
+    """
+    Get full metadata for a stored procedure: parameters, create/modify dates, and definition.
+    """
+    sps = (
+        _load_cache()["sources"][source]["schemas"][schema]
+        .get("stored_procedures", {})
+    )
+    if name not in sps:
+        return {"error": f"Stored procedure '{name}' not found in {source}.{schema}"}
+    return sps[name]
+
+
+@mcp.tool
+def search_stored_procedures(
+    source: str, keyword: str, schema: Optional[str] = None
+) -> List[Dict[str, str]]:
+    """
+    Search for stored procedures whose names contain *keyword* (case-insensitive).
+    Optionally restrict to a single schema.
+    """
+    kw = keyword.lower()
+    all_schemas = _load_cache()["sources"][source]["schemas"]
+    scope = {schema: all_schemas[schema]} if schema else all_schemas
+    results = [
+        {"schema": sch, "procedure": name}
+        for sch, sdata in scope.items()
+        for name in sdata.get("stored_procedures", {})
+        if kw in name.lower()
+    ]
+    return sorted(results, key=lambda x: (x["schema"], x["procedure"]))
+
+
+# ---------------------------------------------------------------------------
+# Call template helpers
+# ---------------------------------------------------------------------------
+_TYPE_PY_LITERAL: Dict[str, str] = {
+    "int": "0",
+    "bigint": "0",
+    "smallint": "0",
+    "tinyint": "0",
+    "float": "0.0",
+    "real": "0.0",
+    "decimal": "0.0",
+    "numeric": "0.0",
+    "money": "0.0",
+    "smallmoney": "0.0",
+    "bit": "True",
+    "datetime": '"2024-01-01"',
+    "datetime2": '"2024-01-01"',
+    "date": '"2024-01-01"',
+    "time": '"00:00:00"',
+    "smalldatetime": '"2024-01-01"',
+    "char": '"value"',
+    "nchar": '"value"',
+    "varchar": '"value"',
+    "nvarchar": '"value"',
+    "text": '"value"',
+    "ntext": '"value"',
+    "uniqueidentifier": '"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"',
+    "varbinary": 'b""',
+    "binary": 'b""',
+    "image": 'b""',
+    "xml": '"<root/>"',
+}
+
+
+def _py_placeholder(param: Dict[str, Any]) -> str:
+    return _TYPE_PY_LITERAL.get(param["data_type"].lower(), '"value"')
+
+
+def _render_sql_template(schema: str, name: str, params: List[Dict[str, Any]]) -> str:
+    lines = [f"EXEC [{schema}].[{name}]"]
+    input_params = [p for p in params if not p.get("is_output")]
+    output_params = [p for p in params if p.get("is_output")]
+
+    all_params = input_params + output_params
+    for i, p in enumerate(all_params):
+        sep = "," if i < len(all_params) - 1 else " ;"
+        direction = "OUTPUT" if p.get("is_output") else ""
+        length = f"({p['max_length']})" if p.get("max_length") not in (None, "4", "8") else ""
+        type_hint = f"{p['data_type']}{length}"
+        default_note = "  -- has default, may omit" if p.get("has_default") else ""
+        out_kw = " OUTPUT" if direction else ""
+        lines.append(
+            f"    {p['name']} = <{type_hint}>{out_kw}{sep}{default_note}"
+        )
+
+    return "\n".join(lines)
+
+
+def _render_python_template(
+    schema: str, name: str, params: List[Dict[str, Any]]
+) -> str:
+    input_params = [p for p in params if not p.get("is_output")]
+    output_params = [p for p in params if p.get("is_output")]
+
+    # Variable assignments for input params
+    var_lines = []
+    for p in input_params:
+        var_name = p["name"].lstrip("@")
+        default_note = "  # has default — may omit" if p.get("has_default") else ""
+        var_lines.append(
+            f"{var_name} = {_py_placeholder(p)}  # {p['data_type']}{default_note}"
+        )
+
+    # Build EXEC string and positional args
+    param_placeholders = []
+    param_args = []
+    for p in input_params:
+        param_placeholders.append(f"{p['name']} = ?")
+        param_args.append(p["name"].lstrip("@"))
+    for p in output_params:
+        param_placeholders.append(f"{p['name']} = ? OUTPUT")
+        param_args.append("None  # output — read from SELECT after EXEC")
+
+    exec_sql = f"EXEC [{schema}].[{name}]"
+    if param_placeholders:
+        joined = ",\n            ".join(param_placeholders)
+        exec_sql = f"EXEC [{schema}].[{name}]\n            {joined}"
+
+    args_str = ", ".join(param_args)
+
+    output_note = ""
+    if output_params:
+        names = ", ".join(p["name"] for p in output_params)
+        output_note = (
+            f"\n    # Output parameters — retrieve via a trailing SELECT in the SP or\n"
+            f"    # check datasets for a result set containing: {names}\n"
+        )
+
+    vars_block = "\n".join(var_lines) if var_lines else "# (no input parameters)"
+
+    return f"""\
+import pyodbc
+
+# ── Connection ─────────────────────────────────────────────────────────────
+conn_str = (
+    "DRIVER={{ODBC Driver 17 for SQL Server}};"
+    "Server=<YOUR_SERVER>;"
+    "Database=<YOUR_DATABASE>;"
+    "Trusted_Connection=Yes;"
+)
+
+# ── Parameters ─────────────────────────────────────────────────────────────
+{vars_block}
+{output_note}
+# ── Execute + collect ALL result sets ──────────────────────────────────────
+with pyodbc.connect(conn_str) as conn:
+    cursor = conn.cursor()
+    cursor.execute(
+        \"\"\"{exec_sql}\"\"\",
+        {args_str if args_str else "  # no parameters"},
+    )
+
+    datasets = []
+    while True:
+        if cursor.description:
+            cols = [col[0] for col in cursor.description]
+            rows = [dict(zip(cols, row)) for row in cursor.fetchall()]
+            datasets.append({{"columns": cols, "rows": rows}})
+        if not cursor.nextset():
+            break
+
+# ── Results ────────────────────────────────────────────────────────────────
+for i, ds in enumerate(datasets, 1):
+    print(f"\\n── Result Set {{i}} ({{len(ds['rows'])}} rows) ──")
+    print("Columns:", ds["columns"])
+    for row in ds["rows"]:
+        print(row)
+"""
+
+
+@mcp.tool
+def get_call_template(
+    source: str,
+    schema: str,
+    name: str,
+    style: str = "sql",
+) -> str:
+    """
+    Generate a ready-to-use call template for a stored procedure.
+
+    style='sql'    — EXEC statement with typed placeholders for each parameter.
+    style='python' — pyodbc script that executes the SP and collects every result
+                     set returned by the server using cursor.nextset().
+
+    Args:
+        source: Source name from the metadata cache.
+        schema: Schema that owns the procedure.
+        name:   Stored procedure name.
+        style:  'sql' or 'python'  (default 'sql').
+    """
+    if style not in ("sql", "python"):
+        return "Error: style must be 'sql' or 'python'."
+
+    sps = (
+        _load_cache()["sources"][source]["schemas"][schema]
+        .get("stored_procedures", {})
+    )
+    if name not in sps:
+        return f"Error: Stored procedure '{name}' not found in {source}.{schema}."
+
+    params: List[Dict[str, Any]] = sps[name].get("parameters", [])
+    params_sorted = sorted(params, key=lambda p: p.get("ordinal", 0))
+
+    if style == "sql":
+        return _render_sql_template(schema, name, params_sorted)
+    return _render_python_template(schema, name, params_sorted)
 
 
 # ---------------------------------------------------------------------------

@@ -5,6 +5,7 @@ This module is used by:
   - The MCP server (db_tools.server) for the refresh_metadata tool
   - The CLI entry point (db-tools-refresh)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -39,13 +40,25 @@ def _exec(eng: Engine, sql: str, params: Optional[dict] = None) -> List[dict]:
 def _columns_to_tables(cols: List[dict]) -> Dict[str, Any]:
     tables: Dict[str, Any] = defaultdict(lambda: {"columns": []})
     for c in cols:
-        tables[c["TABLE_NAME"]]["columns"].append(
-            {
-                "name": c["COLUMN_NAME"],
-                "data_type": c["DATA_TYPE"],
-                "nullable": c["IS_NULLABLE"] == "YES",
-            }
-        )
+        col: Dict[str, Any] = {
+            "name": c["COLUMN_NAME"],
+            "data_type": c["DATA_TYPE"],
+            "nullable": c["IS_NULLABLE"] == "YES",
+        }
+        # Extended fields — present only for SQL Server extractions
+        if "CHARACTER_MAXIMUM_LENGTH" in c:
+            raw_len = c["CHARACTER_MAXIMUM_LENGTH"]
+            # SQL Server returns -1 for varchar(max)/nvarchar(max)/varbinary(max)
+            col["max_length"] = "max" if raw_len == -1 else raw_len
+        if "COLUMN_DEFAULT" in c:
+            col["column_default"] = c["COLUMN_DEFAULT"]  # None when no default defined
+        if "IS_IDENTITY" in c:
+            col["is_identity"] = bool(c["IS_IDENTITY"])
+        if "IS_COMPUTED" in c:
+            col["is_computed"] = bool(c["IS_COMPUTED"])
+        if "IS_PK" in c:
+            col["primary_key"] = bool(c["IS_PK"])
+        tables[c["TABLE_NAME"]]["columns"].append(col)
     return dict(tables)
 
 
@@ -111,6 +124,87 @@ def _heuristic_pairs(cols: List[dict]) -> List[Tuple]:
 # ---------------------------------------------------------------------------
 # SQL Server extraction
 # ---------------------------------------------------------------------------
+_SP_LIST_SQLSERVER = """\
+SELECT
+    pr.name        AS proc_name,
+    pr.create_date,
+    pr.modify_date
+FROM sys.procedures pr
+JOIN sys.schemas s ON pr.schema_id = s.schema_id
+WHERE s.name = :schema
+ORDER BY pr.name
+"""
+
+_SP_PARAMS_SQLSERVER = """\
+SELECT
+    pr.name              AS proc_name,
+    param.parameter_id   AS param_ordinal,
+    param.name           AS param_name,
+    t.name               AS param_type,
+    CASE WHEN param.max_length = -1 THEN 'max'
+         ELSE CAST(param.max_length AS NVARCHAR) END AS param_max_length,
+    param.is_output      AS is_output,
+    param.has_default_value AS has_default
+FROM sys.procedures pr
+JOIN sys.schemas s ON pr.schema_id = s.schema_id
+JOIN sys.parameters param ON pr.object_id = param.object_id
+    AND param.parameter_id > 0
+JOIN sys.types t ON param.user_type_id = t.user_type_id
+WHERE s.name = :schema
+ORDER BY pr.name, param.parameter_id
+"""
+
+_SP_DEFINITIONS_SQLSERVER = """\
+SELECT
+    p.name        AS proc_name,
+    m.definition
+FROM sys.sql_modules m
+JOIN sys.procedures p ON m.object_id = p.object_id
+JOIN sys.schemas s ON p.schema_id = s.schema_id
+WHERE s.name = :schema
+"""
+
+
+def _build_stored_procedures(
+    list_rows: List[dict], param_rows: List[dict], def_rows: List[dict]
+) -> Dict[str, Any]:
+    """Assemble a {proc_name: {...}} dict from three separate query result sets."""
+    procs: Dict[str, Any] = {}
+    for r in list_rows:
+        procs[r["proc_name"]] = {
+            "create_date": str(r["create_date"]) if r["create_date"] else None,
+            "modify_date": str(r["modify_date"]) if r["modify_date"] else None,
+            "parameters": [],
+        }
+    for r in param_rows:
+        if r["proc_name"] in procs:
+            procs[r["proc_name"]]["parameters"].append(
+                {
+                    "name": r["param_name"],
+                    "ordinal": r["param_ordinal"],
+                    "data_type": r["param_type"],
+                    "max_length": r["param_max_length"],
+                    "is_output": bool(r["is_output"]),
+                    "has_default": bool(r["has_default"]),
+                }
+            )
+    for r in def_rows:
+        if r["proc_name"] in procs:
+            procs[r["proc_name"]]["definition"] = r["definition"]
+    return procs
+
+
+_PK_SQLSERVER = """\
+SELECT kcu.TABLE_SCHEMA, kcu.TABLE_NAME, kcu.COLUMN_NAME
+FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+  ON kcu.CONSTRAINT_CATALOG = tc.CONSTRAINT_CATALOG
+ AND kcu.CONSTRAINT_SCHEMA  = tc.CONSTRAINT_SCHEMA
+ AND kcu.CONSTRAINT_NAME    = tc.CONSTRAINT_NAME
+WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+  AND tc.TABLE_SCHEMA = :schema
+"""
+
 _FK_SQLSERVER = """\
 SELECT
   kcu1.TABLE_SCHEMA   AS fk_schema,
@@ -150,18 +244,42 @@ def extract_sqlserver(url: str, include: List[str], exclude: List[str]) -> dict:
     for s in target:
         cols = _exec(
             eng,
-            "SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE "
-            "FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = :schema",
+            """
+            SELECT
+                TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME,
+                DATA_TYPE, CHARACTER_MAXIMUM_LENGTH,
+                IS_NULLABLE, COLUMN_DEFAULT,
+                COLUMNPROPERTY(OBJECT_ID(TABLE_SCHEMA+'.'+TABLE_NAME), COLUMN_NAME, 'IsIdentity') AS IS_IDENTITY,
+                COLUMNPROPERTY(OBJECT_ID(TABLE_SCHEMA+'.'+TABLE_NAME), COLUMN_NAME, 'IsComputed') AS IS_COMPUTED
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = :schema
+            ORDER BY ORDINAL_POSITION
+            """,
             {"schema": s},
         )
+        pk_rows = _exec(eng, _PK_SQLSERVER, {"schema": s})
+        pk_set = {(r["TABLE_NAME"], r["COLUMN_NAME"]) for r in pk_rows}
+        for c in cols:
+            c["IS_PK"] = (c["TABLE_NAME"], c["COLUMN_NAME"]) in pk_set
+
         fks = [r for r in all_fks if r.get("fk_schema") == s]
         tables = _columns_to_tables(cols)
+
+        sp_list = _exec(eng, _SP_LIST_SQLSERVER, {"schema": s})
+        sp_params = _exec(eng, _SP_PARAMS_SQLSERVER, {"schema": s})
+        sp_defs = _exec(eng, _SP_DEFINITIONS_SQLSERVER, {"schema": s})
+        stored_procedures = _build_stored_procedures(sp_list, sp_params, sp_defs)
+
         payload["schemas"][s] = {
             "tables": tables,
             "foreign_keys": _group_fk_rows(fks),
             "heuristics": _heuristic_pairs(cols),
+            "stored_procedures": stored_procedures,
         }
-        logger.info(f"  '{s}': {len(tables)} tables, {len(fks)} FKs")
+        logger.info(
+            f"  '{s}': {len(tables)} tables, {len(fks)} FKs, "
+            f"{len(pk_set)} PK cols, {len(stored_procedures)} stored procedures"
+        )
 
     logger.info("SQL Server extraction complete")
     return payload
@@ -319,11 +437,25 @@ def _diff_metadata(old: dict, new: dict) -> dict:
                     "columns_modified": modified_cols,
                 }
 
-        if added_tables or removed_tables or changed_tables:
+        old_sps = old_schemas[schema].get("stored_procedures", {})
+        new_sps = new_schemas[schema].get("stored_procedures", {})
+        added_sps = sorted(set(new_sps) - set(old_sps))
+        removed_sps = sorted(set(old_sps) - set(new_sps))
+        modified_sps = [
+            {"procedure": name, "old_modify_date": old_sps[name].get("modify_date"),
+             "new_modify_date": new_sps[name].get("modify_date")}
+            for name in sorted(set(old_sps) & set(new_sps))
+            if old_sps[name].get("modify_date") != new_sps[name].get("modify_date")
+        ]
+
+        if added_tables or removed_tables or changed_tables or added_sps or removed_sps or modified_sps:
             changed_schemas[schema] = {
                 "tables_added": added_tables,
                 "tables_removed": removed_tables,
                 "tables_changed": changed_tables,
+                "procedures_added": added_sps,
+                "procedures_removed": removed_sps,
+                "procedures_modified": modified_sps,
             }
 
     has_changes = bool(added_schemas or removed_schemas or changed_schemas)
@@ -405,9 +537,7 @@ def cli_main() -> None:
         metavar="NAME",
         help="Refresh only this source (default: all enabled sources)",
     )
-    ap.add_argument(
-        "--verbose", "-v", action="store_true", help="Enable debug logging"
-    )
+    ap.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
     args = ap.parse_args()
 
     setup_cli_logging(verbose=args.verbose)
@@ -423,9 +553,7 @@ def cli_main() -> None:
     if args.source:
         if args.source not in cfg:
             available = [k for k in cfg if k != "output"]
-            logger.error(
-                f"Source '{args.source}' not found. Available: {available}"
-            )
+            logger.error(f"Source '{args.source}' not found. Available: {available}")
             sys.exit(1)
         sources = {args.source: cfg[args.source]}
     else:

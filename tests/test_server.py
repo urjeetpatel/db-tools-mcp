@@ -1,4 +1,5 @@
 """Tests for db_tools.server — MCP tool functions against fixture cache data."""
+
 from __future__ import annotations
 
 from unittest.mock import patch
@@ -336,7 +337,11 @@ class TestRefreshMetadata:
         mark_refreshed("db1")
 
         monkeypatch.setattr(
-            "db_tools.server.run_refresh", lambda name, cfg: "refreshed 0 schemas"
+            "db_tools.server.run_refresh",
+            lambda name, cfg: {
+                "detail": "refreshed 0 schemas",
+                "diff": {"has_changes": False},
+            },
         )
         result = refresh_metadata(source="db1", force=True)
         assert result["results"]["db1"]["status"] == "ok"
