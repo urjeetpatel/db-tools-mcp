@@ -4,7 +4,8 @@ Database Metadata MCP Server.
 Tools:
   Read  : list_sources, list_schemas, list_tables, get_table, get_dialect,
           list_all_foreign_keys, find_direct_joins, suggest_joins,
-          search_tables, search_columns
+          search_tables, search_columns,
+          list_stored_procedures, get_stored_procedure, search_stored_procedures
   Admin : refresh_metadata, add_database
 
 Config : ~/.config/db-tools/config.yaml   (or $DB_TOOLS_CONFIG_DIR)
@@ -248,6 +249,53 @@ def search_columns(
                         }
                     )
     return sorted(results, key=lambda x: (x["schema"], x["table"], x["column"]))
+
+
+# ---------------------------------------------------------------------------
+# Stored procedure tools
+# ---------------------------------------------------------------------------
+@mcp.tool
+def list_stored_procedures(source: str, schema: str) -> List[str]:
+    """List all stored procedure names in a given schema."""
+    return sorted(
+        _load_cache()["sources"][source]["schemas"][schema]
+        .get("stored_procedures", {})
+        .keys()
+    )
+
+
+@mcp.tool
+def get_stored_procedure(source: str, schema: str, name: str) -> Dict[str, Any]:
+    """
+    Get full metadata for a stored procedure: parameters, create/modify dates, and definition.
+    """
+    sps = (
+        _load_cache()["sources"][source]["schemas"][schema]
+        .get("stored_procedures", {})
+    )
+    if name not in sps:
+        return {"error": f"Stored procedure '{name}' not found in {source}.{schema}"}
+    return sps[name]
+
+
+@mcp.tool
+def search_stored_procedures(
+    source: str, keyword: str, schema: Optional[str] = None
+) -> List[Dict[str, str]]:
+    """
+    Search for stored procedures whose names contain *keyword* (case-insensitive).
+    Optionally restrict to a single schema.
+    """
+    kw = keyword.lower()
+    all_schemas = _load_cache()["sources"][source]["schemas"]
+    scope = {schema: all_schemas[schema]} if schema else all_schemas
+    results = [
+        {"schema": sch, "procedure": name}
+        for sch, sdata in scope.items()
+        for name in sdata.get("stored_procedures", {})
+        if kw in name.lower()
+    ]
+    return sorted(results, key=lambda x: (x["schema"], x["procedure"]))
 
 
 # ---------------------------------------------------------------------------

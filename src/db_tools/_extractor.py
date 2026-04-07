@@ -124,6 +124,76 @@ def _heuristic_pairs(cols: List[dict]) -> List[Tuple]:
 # ---------------------------------------------------------------------------
 # SQL Server extraction
 # ---------------------------------------------------------------------------
+_SP_LIST_SQLSERVER = """\
+SELECT
+    pr.name        AS proc_name,
+    pr.create_date,
+    pr.modify_date
+FROM sys.procedures pr
+JOIN sys.schemas s ON pr.schema_id = s.schema_id
+WHERE s.name = :schema
+ORDER BY pr.name
+"""
+
+_SP_PARAMS_SQLSERVER = """\
+SELECT
+    pr.name              AS proc_name,
+    param.parameter_id   AS param_ordinal,
+    param.name           AS param_name,
+    t.name               AS param_type,
+    CASE WHEN param.max_length = -1 THEN 'max'
+         ELSE CAST(param.max_length AS NVARCHAR) END AS param_max_length,
+    param.is_output      AS is_output,
+    param.has_default_value AS has_default
+FROM sys.procedures pr
+JOIN sys.schemas s ON pr.schema_id = s.schema_id
+JOIN sys.parameters param ON pr.object_id = param.object_id
+    AND param.parameter_id > 0
+JOIN sys.types t ON param.user_type_id = t.user_type_id
+WHERE s.name = :schema
+ORDER BY pr.name, param.parameter_id
+"""
+
+_SP_DEFINITIONS_SQLSERVER = """\
+SELECT
+    p.name        AS proc_name,
+    m.definition
+FROM sys.sql_modules m
+JOIN sys.procedures p ON m.object_id = p.object_id
+JOIN sys.schemas s ON p.schema_id = s.schema_id
+WHERE s.name = :schema
+"""
+
+
+def _build_stored_procedures(
+    list_rows: List[dict], param_rows: List[dict], def_rows: List[dict]
+) -> Dict[str, Any]:
+    """Assemble a {proc_name: {...}} dict from three separate query result sets."""
+    procs: Dict[str, Any] = {}
+    for r in list_rows:
+        procs[r["proc_name"]] = {
+            "create_date": str(r["create_date"]) if r["create_date"] else None,
+            "modify_date": str(r["modify_date"]) if r["modify_date"] else None,
+            "parameters": [],
+        }
+    for r in param_rows:
+        if r["proc_name"] in procs:
+            procs[r["proc_name"]]["parameters"].append(
+                {
+                    "name": r["param_name"],
+                    "ordinal": r["param_ordinal"],
+                    "data_type": r["param_type"],
+                    "max_length": r["param_max_length"],
+                    "is_output": bool(r["is_output"]),
+                    "has_default": bool(r["has_default"]),
+                }
+            )
+    for r in def_rows:
+        if r["proc_name"] in procs:
+            procs[r["proc_name"]]["definition"] = r["definition"]
+    return procs
+
+
 _PK_SQLSERVER = """\
 SELECT kcu.TABLE_SCHEMA, kcu.TABLE_NAME, kcu.COLUMN_NAME
 FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
@@ -194,13 +264,21 @@ def extract_sqlserver(url: str, include: List[str], exclude: List[str]) -> dict:
 
         fks = [r for r in all_fks if r.get("fk_schema") == s]
         tables = _columns_to_tables(cols)
+
+        sp_list = _exec(eng, _SP_LIST_SQLSERVER, {"schema": s})
+        sp_params = _exec(eng, _SP_PARAMS_SQLSERVER, {"schema": s})
+        sp_defs = _exec(eng, _SP_DEFINITIONS_SQLSERVER, {"schema": s})
+        stored_procedures = _build_stored_procedures(sp_list, sp_params, sp_defs)
+
         payload["schemas"][s] = {
             "tables": tables,
             "foreign_keys": _group_fk_rows(fks),
             "heuristics": _heuristic_pairs(cols),
+            "stored_procedures": stored_procedures,
         }
         logger.info(
-            f"  '{s}': {len(tables)} tables, {len(fks)} FKs, {len(pk_set)} PK cols"
+            f"  '{s}': {len(tables)} tables, {len(fks)} FKs, "
+            f"{len(pk_set)} PK cols, {len(stored_procedures)} stored procedures"
         )
 
     logger.info("SQL Server extraction complete")
@@ -359,11 +437,25 @@ def _diff_metadata(old: dict, new: dict) -> dict:
                     "columns_modified": modified_cols,
                 }
 
-        if added_tables or removed_tables or changed_tables:
+        old_sps = old_schemas[schema].get("stored_procedures", {})
+        new_sps = new_schemas[schema].get("stored_procedures", {})
+        added_sps = sorted(set(new_sps) - set(old_sps))
+        removed_sps = sorted(set(old_sps) - set(new_sps))
+        modified_sps = [
+            {"procedure": name, "old_modify_date": old_sps[name].get("modify_date"),
+             "new_modify_date": new_sps[name].get("modify_date")}
+            for name in sorted(set(old_sps) & set(new_sps))
+            if old_sps[name].get("modify_date") != new_sps[name].get("modify_date")
+        ]
+
+        if added_tables or removed_tables or changed_tables or added_sps or removed_sps or modified_sps:
             changed_schemas[schema] = {
                 "tables_added": added_tables,
                 "tables_removed": removed_tables,
                 "tables_changed": changed_tables,
+                "procedures_added": added_sps,
+                "procedures_removed": removed_sps,
+                "procedures_modified": modified_sps,
             }
 
     has_changes = bool(added_schemas or removed_schemas or changed_schemas)
