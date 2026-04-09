@@ -6,7 +6,7 @@ Tools:
           list_all_foreign_keys, find_direct_joins, suggest_joins,
           search_tables, search_columns,
           list_stored_procedures, get_stored_procedure, search_stored_procedures,
-          get_call_template
+          get_call_template, export_stored_procedure
   Admin : refresh_metadata, add_database
 
 Config : ~/.config/db-tools/config.yaml   (or $DB_TOOLS_CONFIG_DIR)
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 from collections import deque
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastmcp import FastMCP
@@ -475,6 +476,120 @@ def get_call_template(
     if style == "sql":
         return _render_sql_template(schema, name, params_sorted)
     return _render_python_template(schema, name, params_sorted)
+
+
+# Blocked path prefixes — normalised to lowercase for case-insensitive comparison.
+# Any resolved output path that starts with one of these is rejected.
+_BLOCKED_PATH_PREFIXES: List[Path] = [
+    # Windows system directories
+    Path("C:/Windows"),
+    Path("C:/Program Files"),
+    Path("C:/Program Files (x86)"),
+    Path("C:/ProgramData"),
+    # Common *nix system trees
+    Path("/etc"),
+    Path("/bin"),
+    Path("/sbin"),
+    Path("/usr"),
+    Path("/lib"),
+    Path("/lib64"),
+    Path("/boot"),
+    Path("/sys"),
+    Path("/proc"),
+    Path("/dev"),
+]
+
+
+def _check_safe_output_path(raw: str) -> Optional[str]:
+    """
+    Return an error message if *raw* is not a safe write destination, else None.
+
+    Checks:
+      - No null bytes in the path string
+      - Not a UNC / network path (\\\\server\\share)
+      - Not a bare drive root (C:\\)
+      - Not inside a known sensitive system directory
+      - Not inside the app's own config/cache directory
+    """
+    if "\x00" in raw:
+        return "Path contains null bytes."
+
+    # Reject UNC network paths (\\server\share or //server/share)
+    if raw.startswith("\\\\") or raw.startswith("//"):
+        return "Writing to UNC/network paths is not allowed."
+
+    try:
+        resolved = Path(raw).resolve()
+    except (ValueError, OSError) as exc:
+        return f"Invalid path: {exc}"
+
+    # Reject bare drive roots (e.g. C:\) — parent == self on a root
+    if resolved == resolved.parent:
+        return "Writing directly to a drive/filesystem root is not allowed."
+
+    # Reject sensitive system directories
+    for blocked in _BLOCKED_PATH_PREFIXES:
+        try:
+            resolved.relative_to(blocked.resolve())
+            return f"Writing to '{blocked}' is not allowed."
+        except ValueError:
+            pass
+
+    # Reject the app's own config / cache directory
+    try:
+        resolved.relative_to(APP_DIR.resolve())
+        return f"Writing inside the db-tools config directory ({APP_DIR}) is not allowed."
+    except ValueError:
+        pass
+
+    return None
+
+
+@mcp.tool
+def export_stored_procedure(
+    source: str,
+    schema: str,
+    name: str,
+    output_file: str,
+) -> Dict[str, Any]:
+    """
+    Write the stored procedure definition (SQL code only) to a file.
+
+    Args:
+        source:      Source name from the metadata cache.
+        schema:      Schema that owns the procedure.
+        name:        Stored procedure name.
+        output_file: Absolute path to the output file (will be created or overwritten).
+                     Must not target system directories, network paths, or the
+                     db-tools config/cache directory.
+
+    Returns a success message with the resolved file path and line count.
+    """
+    path_error = _check_safe_output_path(output_file)
+    if path_error:
+        return {"error": f"Unsafe output path: {path_error}"}
+
+    sps = (
+        _load_cache()["sources"][source]["schemas"][schema]
+        .get("stored_procedures", {})
+    )
+    if name not in sps:
+        return {"error": f"Stored procedure '{name}' not found in {source}.{schema}"}
+
+    definition: str = sps[name].get("definition", "")
+    if not definition:
+        return {"error": f"No definition found for '{name}' in {source}.{schema}"}
+
+    out_path = Path(output_file)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(definition, encoding="utf-8")
+
+    line_count = definition.count("\n") + (1 if definition and not definition.endswith("\n") else 0)
+    return {
+        "status": "ok",
+        "file": str(out_path.resolve()),
+        "line_count": line_count,
+    }
 
 
 # ---------------------------------------------------------------------------

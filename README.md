@@ -104,6 +104,18 @@ db-tools-refresh --source my_db   # if installed locally
 | `search_tables(source, keyword)` | Search table names |
 | `search_columns(source, column_name)` | Search column names |
 
+### Stored procedure tools
+
+| Tool | Description |
+|---|---|
+| `list_stored_procedures(source, schema)` | List stored procedure names in a schema |
+| `get_stored_procedure(source, schema, name)` | Get SP metadata: parameters, dates, and definition |
+| `search_stored_procedures(source, keyword)` | Search SP names (case-insensitive, optional schema filter) |
+| `get_call_template(source, schema, name, style)` | Generate a SQL or Python call template for an SP |
+| `export_stored_procedure(source, schema, name, output_file)` | Write SP definition (SQL only) to a file; returns resolved path + line count |
+
+`export_stored_procedure` writes the raw SQL definition only — no JSON wrapper. The `output_file` must be an absolute path to a writable location; writes to system directories, network paths, drive roots, and the db-tools config directory are blocked.
+
 ### Admin tools (require confirmation)
 
 | Tool | Description |
