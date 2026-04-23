@@ -7,7 +7,14 @@ MCP server that exposes SQL Server and Snowflake schema metadata to AI coding ag
 ### 1. Install and run with `uvx`
 
 ```bash
-uvx --from "git+https://github.com/urjeetpatel/db-tools-mcp" db-tools-mcp
+uvx db-tools-mcp
+```
+
+Or install with `pip`:
+
+```bash
+pip install db-tools-mcp
+db-tools-mcp
 ```
 
 Or install locally for development:
@@ -28,7 +35,7 @@ uv run db-tools-mcp
   "mcpServers": {
     "db-tools": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/urjeetpatel/db-tools-mcp", "db-tools-mcp"]
+      "args": ["db-tools-mcp"]
     }
   }
 }
@@ -41,7 +48,7 @@ uv run db-tools-mcp
   "mcpServers": {
     "Db_Tools": {
       "command": "uvx",
-      "args": ["--from", "git+https://github.com/urjeetpatel/db-tools-mcp", "db-tools-mcp"]
+      "args": ["db-tools-mcp"]
     }
   }
 }
@@ -83,7 +90,7 @@ refresh_metadata(source="my_db")  # one source
 Or from the command line:
 
 ```bash
-uvx --from "git+https://github.com/urjeetpatel/db-tools-mcp" db-tools-refresh
+uvx db-tools-refresh
 db-tools-refresh --source my_db   # if installed locally
 ```
 
