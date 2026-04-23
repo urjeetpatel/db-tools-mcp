@@ -4,13 +4,12 @@ on:
   push:
     tags:
       - "v*"
-    tags-ignore:
-      - "v*rc*"
   workflow_dispatch:
 
 jobs:
   test:
     name: Test
+    if: ${{ !contains(github.ref_name, 'rc') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -34,6 +33,7 @@ jobs:
 
   publish:
     name: Build and publish
+    if: ${{ !contains(github.ref_name, 'rc') }}
     needs: test
     runs-on: ubuntu-latest
     permissions:
