@@ -1,10 +1,13 @@
 [project]
 name = "db-tools-mcp"
 version = "0.2.0"
+authors = [
+    { name = "Urjeet Patel", email = "violentmagician.opensource@gmail.com" },
+]
 description = "MCP server for querying SQL Server and Snowflake schema metadata"
-readme = "README.md"
+readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 dependencies = [
     "fastmcp>=3.0.2",
     "loguru>=0.7.3",
@@ -12,10 +15,38 @@ dependencies = [
     "pyyaml>=6.0.3",
     "sqlalchemy>=2.0.47",
 ]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Database",
+    "Operating System :: OS Independent",
+]
+
+keywords = [
+    "mcp",
+    "metadata",
+    "sqlserver",
+    "snowflake",
+    "mcp-server",
+    "database",
+]
+
+[project.urls]
+Homepage = "https://github.com/urjeetpatel/db-tools-mcp"
+Repository = "https://github.com/urjeetpatel/db-tools-mcp"
+"Bug Tracker" = "https://github.com/urjeetpatel/db-tools-mcp/issues"
 
 [project.scripts]
 db-tools-mcp = "db_tools.server:main"
 db-tools-refresh = "db_tools._extractor:cli_main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
 
 [build-system]
 requires = ["hatchling"]
@@ -25,6 +56,4 @@ build-backend = "hatchling.build"
 packages = ["src/db_tools"]
 
 [dependency-groups]
-dev = [
-    "pytest>=8.0",
-]
+dev = ["pytest>=8.0"]
