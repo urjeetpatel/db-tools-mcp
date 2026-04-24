@@ -300,6 +300,32 @@ def search_stored_procedures(
     return sorted(results, key=lambda x: (x["schema"], x["procedure"]))
 
 
+@mcp.tool
+def search_stored_procedure_text(
+    source: str, keyword: str, schema: Optional[str] = None
+) -> List[Dict[str, str]]:
+    """
+    Search the body (definition) of stored procedures for *keyword* (case-insensitive).
+    Returns each matching procedure with a short excerpt showing the first line that
+    contains the keyword.  Optionally restrict to a single schema.
+    """
+    kw = keyword.lower()
+    all_schemas = _load_cache()["sources"][source]["schemas"]
+    scope = {schema: all_schemas[schema]} if schema else all_schemas
+    results = []
+    for sch, sdata in scope.items():
+        for name, meta in sdata.get("stored_procedures", {}).items():
+            definition = meta.get("definition") or ""
+            if kw in definition.lower():
+                # Find the first matching line for a useful excerpt
+                excerpt = next(
+                    (line.strip() for line in definition.splitlines() if kw in line.lower()),
+                    "",
+                )
+                results.append({"schema": sch, "procedure": name, "match_excerpt": excerpt})
+    return sorted(results, key=lambda x: (x["schema"], x["procedure"]))
+
+
 # ---------------------------------------------------------------------------
 # Call template helpers
 # ---------------------------------------------------------------------------

@@ -118,6 +118,7 @@ db-tools-refresh --source my_db   # if installed locally
 | `list_stored_procedures(source, schema)` | List stored procedure names in a schema |
 | `get_stored_procedure(source, schema, name)` | Get SP metadata: parameters, dates, and definition |
 | `search_stored_procedures(source, keyword)` | Search SP names (case-insensitive, optional schema filter) |
+| `search_stored_procedure_text(source, keyword)` | Search SP body text for a keyword; returns matching procedures with a one-line excerpt |
 | `get_call_template(source, schema, name, style)` | Generate a SQL or Python call template for an SP |
 | `export_stored_procedure(source, schema, name, output_file)` | Write SP definition (SQL only) to a file; returns resolved path + line count |
 
